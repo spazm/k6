@@ -655,8 +655,7 @@ func (vm *vm) peek() Value {
 }
 
 func (vm *vm) saveCtx(ctx *context) {
-	ctx.prg, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args, ctx.funcName =
-		vm.prg, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args, vm.funcName
+	ctx.prg, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args, ctx.funcName = vm.prg, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args, vm.funcName
 }
 
 func (vm *vm) pushCtx() {
@@ -673,8 +672,7 @@ func (vm *vm) pushCtx() {
 }
 
 func (vm *vm) restoreCtx(ctx *context) {
-	vm.prg, vm.funcName, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args =
-		ctx.prg, ctx.funcName, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
+	vm.prg, vm.funcName, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args = ctx.prg, ctx.funcName, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
 }
 
 func (vm *vm) popCtx() {
@@ -954,6 +952,66 @@ type initStack1P int
 func (s initStack1P) exec(vm *vm) {
 	vm.initStack1(int(s))
 	vm.sp--
+}
+
+type importNamespace struct {
+	module ModuleRecord
+}
+
+func (i importNamespace) exec(vm *vm) {
+	vm.push(vm.r.NamespaceObjectFor(i.module))
+	vm.pc++
+}
+
+type export struct {
+	idx      uint32
+	callback func(*vm, func() Value)
+}
+
+func (e export) exec(vm *vm) {
+	// from loadStash
+	level := int(e.idx >> 24)
+	idx := uint32(e.idx & 0x00FFFFFF)
+	stash := vm.stash
+	for i := 0; i < level; i++ {
+		stash = stash.outer
+	}
+	e.callback(vm, func() Value {
+		return stash.getByIdx(idx)
+	})
+	vm.pc++
+}
+
+type exportLex struct {
+	idx      uint32
+	callback func(*vm, func() Value)
+}
+
+func (e exportLex) exec(vm *vm) {
+	// from loadStashLex
+	level := int(e.idx >> 24)
+	idx := uint32(e.idx & 0x00FFFFFF)
+	stash := vm.stash
+	for i := 0; i < level; i++ {
+		stash = stash.outer
+	}
+	e.callback(vm, func() Value {
+		v := stash.getByIdx(idx)
+		if v == nil {
+			panic(errAccessBeforeInit)
+		}
+		return v
+	})
+	vm.pc++
+}
+
+type exportIndirect struct {
+	callback func(*vm)
+}
+
+func (e exportIndirect) exec(vm *vm) {
+	e.callback(vm)
+	vm.pc++
 }
 
 type storeStackP int
@@ -2561,6 +2619,14 @@ func (s setGlobalStrict) exec(vm *vm) {
 	vm.pc++
 }
 
+// Load a var indirectly from another module
+type loadIndirect func(vm *vm) Value
+
+func (g loadIndirect) exec(vm *vm) {
+	vm.push(nilSafe(g(vm)))
+	vm.pc++
+}
+
 // Load a var from stash
 type loadStash uint32
 
@@ -3632,6 +3698,12 @@ func (n *newArrowFunc) exec(vm *vm) {
 	vm.pc++
 }
 
+type ambiguousImport unistring.String
+
+func (a ambiguousImport) exec(vm *vm) {
+	panic(vm.r.newError(vm.r.global.SyntaxError, "Ambiguous import for name %s", a))
+}
+
 func (vm *vm) alreadyDeclared(name unistring.String) Value {
 	return vm.r.newError(vm.r.global.SyntaxError, "Identifier '%s' has already been declared", name)
 }
@@ -4003,7 +4075,6 @@ end:
 		return valueTrue
 	}
 	return valueFalse
-
 }
 
 type _op_lt struct{}

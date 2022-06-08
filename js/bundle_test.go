@@ -88,8 +88,8 @@ func TestNewBundle(t *testing.T) {
 	t.Run("Invalid", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", "\x00")
-		require.NotNil(t, err)
-		require.Contains(t, err.Error(), "SyntaxError: file:///script.js: Unexpected character '\x00' (1:0)\n> 1 | \x00\n")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "file:///script.js: Line 1:1 Unexpected token ILLEGAL (and 1 more errors)")
 	})
 	t.Run("Error", func(t *testing.T) {
 		t.Parallel()
@@ -101,7 +101,7 @@ func TestNewBundle(t *testing.T) {
 	t.Run("InvalidExports", func(t *testing.T) {
 		t.Parallel()
 		_, err := getSimpleBundle(t, "/script.js", `module.exports = null`)
-		require.EqualError(t, err, "exports must be an object")
+		require.EqualError(t, err, "commonjs exports must be an object")
 	})
 	t.Run("DefaultUndefined", func(t *testing.T) {
 		t.Parallel()
@@ -165,11 +165,6 @@ func TestNewBundle(t *testing.T) {
 				{
 					"InvalidCompat", "es1", `export default function() {};`,
 					`invalid compatibility mode "es1". Use: "extended", "base"`,
-				},
-				// ES2015 modules are not supported
-				{
-					"Modules", "base", `export default function() {};`,
-					"file:///script.js: Line 2:1 Unexpected reserved word (and 2 more errors)",
 				},
 				// BigInt is not supported
 				{
@@ -507,7 +502,6 @@ func TestNewBundleFromArchive(t *testing.T) {
 
 		checkArchive(t, arc, lib.RuntimeOptions{}, "") // default options
 		checkArchive(t, arc, extCompatModeRtOpts, "")
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")
 	})
 
 	t.Run("es6_script_explicit", func(t *testing.T) {
@@ -518,7 +512,6 @@ func TestNewBundleFromArchive(t *testing.T) {
 
 		checkArchive(t, arc, lib.RuntimeOptions{}, "")
 		checkArchive(t, arc, extCompatModeRtOpts, "")
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")
 	})
 
 	t.Run("es5_script_with_extended", func(t *testing.T) {
@@ -543,13 +536,6 @@ func TestNewBundleFromArchive(t *testing.T) {
 		checkArchive(t, arc, baseCompatModeRtOpts, "")
 	})
 
-	t.Run("es6_archive_with_wrong_compat_mode", func(t *testing.T) {
-		t.Parallel()
-		arc, err := getArchive(t, es6Code, baseCompatModeRtOpts)
-		require.Error(t, err)
-		require.Nil(t, arc)
-	})
-
 	t.Run("messed_up_archive", func(t *testing.T) {
 		t.Parallel()
 		arc, err := getArchive(t, es6Code, extCompatModeRtOpts)
@@ -557,7 +543,6 @@ func TestNewBundleFromArchive(t *testing.T) {
 		arc.CompatibilityMode = "blah"                                           // intentionally break the archive
 		checkArchive(t, arc, lib.RuntimeOptions{}, "invalid compatibility mode") // fails when it uses the archive one
 		checkArchive(t, arc, extCompatModeRtOpts, "")                            // works when I force the compat mode
-		checkArchive(t, arc, baseCompatModeRtOpts, "Unexpected reserved word")   // failes because of ES6
 	})
 
 	t.Run("script_options_dont_overwrite_metadata", func(t *testing.T) {
@@ -777,7 +762,7 @@ func TestBundleInstantiate(t *testing.T) {
 		bi, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
 		// Ensure `options` properties are correctly marshalled
-		jsOptions := bi.pgm.exports.Get("options").ToObject(bi.Runtime)
+		jsOptions := bi.getExported("options").ToObject(bi.Runtime)
 		vus := jsOptions.Get("vus").Export()
 		require.Equal(t, int64(5), vus)
 		tdt := jsOptions.Get("teardownTimeout").Export()
@@ -788,7 +773,7 @@ func TestBundleInstantiate(t *testing.T) {
 		b.Options.VUs = null.IntFrom(10)
 		bi2, err := b.Instantiate(logger, 0)
 		require.NoError(t, err)
-		jsOptions = bi2.pgm.exports.Get("options").ToObject(bi2.Runtime)
+		jsOptions = bi2.getExported("options").ToObject(bi2.Runtime)
 		vus = jsOptions.Get("vus").Export()
 		require.Equal(t, int64(10), vus)
 		b.Options.VUs = optOrig

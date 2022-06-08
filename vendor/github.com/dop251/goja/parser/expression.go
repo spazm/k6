@@ -215,7 +215,6 @@ func (self *_parser) parseParenthesisedExpression() ast.Expression {
 }
 
 func (self *_parser) parseRegExpLiteral() *ast.RegExpLiteral {
-
 	offset := self.chrOffset - 1 // Opening slash already gotten
 	if self.token == token.QUOTIENT_ASSIGN {
 		offset -= 1 // =
@@ -364,6 +363,12 @@ func (self *_parser) parseObjectPropertyKey() (string, unistring.String, ast.Exp
 				Value:   num,
 			}
 		}
+	case token.EXPORT, token.IMPORT:
+		value = &ast.StringLiteral{
+			Idx:     idx,
+			Literal: literal,
+			Value:   parsedLiteral,
+		}
 	case token.PRIVATE_IDENTIFIER:
 		value = &ast.PrivateIdentifier{
 			Identifier: ast.Identifier{
@@ -510,7 +515,6 @@ func (self *_parser) parseObjectLiteral() *ast.ObjectLiteral {
 }
 
 func (self *_parser) parseArrayLiteral() *ast.ArrayLiteral {
-
 	idx0 := self.expect(token.LEFT_BRACKET)
 	var value []ast.Expression
 	for self.token != token.RIGHT_BRACKET && self.token != token.EOF {
@@ -666,6 +670,9 @@ func (self *_parser) parseNewExpression() ast.Expression {
 	if self.token == token.PERIOD {
 		self.next()
 		if self.literal == "target" {
+			if self.opts.module && self.scope.outer == nil {
+				self.errorUnexpectedToken(token.IDENTIFIER) // TODO better error
+			}
 			return &ast.MetaProperty{
 				Meta: &ast.Identifier{
 					Name: unistring.String(token.NEW.String()),
@@ -695,7 +702,6 @@ func (self *_parser) parseNewExpression() ast.Expression {
 }
 
 func (self *_parser) parseLeftHandSideExpression() ast.Expression {
-
 	var left ast.Expression
 	if self.token == token.NEW {
 		left = self.parseNewExpression()
@@ -720,7 +726,6 @@ L:
 }
 
 func (self *_parser) parseLeftHandSideExpressionAllowCall() ast.Expression {
-
 	allowIn := self.scope.allowIn
 	self.scope.allowIn = true
 	defer func() {
@@ -804,7 +809,6 @@ func (self *_parser) parsePostfixExpression() ast.Expression {
 }
 
 func (self *_parser) parseUnaryExpression() ast.Expression {
-
 	switch self.token {
 	case token.PLUS, token.MINUS, token.NOT, token.BITWISE_NOT:
 		fallthrough

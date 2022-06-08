@@ -465,7 +465,72 @@ type (
 	}
 
 	FunctionDeclaration struct {
-		Function *FunctionLiteral
+		Function  *FunctionLiteral
+		IsDefault bool // TODO figure out how to not have to that
+	}
+
+	ImportDeclaration struct {
+		Idx             file.Idx
+		ImportClause    *ImportClause
+		FromClause      *FromClause
+		ModuleSpecifier unistring.String
+	}
+
+	ImportClause struct {
+		ImportedDefaultBinding *Identifier
+		NameSpaceImport        *NameSpaceImport
+		NamedImports           *NamedImports
+	}
+
+	NameSpaceImport struct {
+		ImportedBinding unistring.String
+	}
+
+	NamedImports struct {
+		ImportsList []*ImportSpecifier
+	}
+
+	ImportSpecifier struct {
+		IdentifierName unistring.String
+		Alias          unistring.String
+	}
+
+	ExportDeclaration struct {
+		idx0                 file.Idx
+		idx1                 file.Idx
+		Variable             *VariableStatement
+		AssignExpression     Expression
+		LexicalDeclaration   *LexicalDeclaration
+		ClassDeclaration     *ClassDeclaration
+		NamedExports         *NamedExports
+		ExportFromClause     *ExportFromClause
+		FromClause           *FromClause
+		HoistableDeclaration *HoistableDeclaration
+		IsDefault            bool
+	}
+
+	FromClause struct {
+		ModuleSpecifier unistring.String
+	}
+	ExportFromClause struct {
+		IsWildcard   bool
+		Alias        unistring.String
+		NamedExports *NamedExports
+	}
+
+	NamedExports struct {
+		ExportsList []*ExportSpecifier
+	}
+
+	ExportSpecifier struct {
+		IdentifierName unistring.String
+		Alias          unistring.String
+	}
+
+	HoistableDeclaration struct {
+		FunctionDeclaration *FunctionDeclaration
+		// GeneratorDeclaration
+		// AsyncFunc and AsyncGenerator
 	}
 
 	ClassDeclaration struct {
@@ -499,6 +564,9 @@ func (*WithStatement) _statementNode()       {}
 func (*LexicalDeclaration) _statementNode()  {}
 func (*FunctionDeclaration) _statementNode() {}
 func (*ClassDeclaration) _statementNode()    {}
+
+func (*ExportDeclaration) _statementNode() {}
+func (*ImportDeclaration) _statementNode() {}
 
 // =========== //
 // Declaration //
@@ -615,6 +683,8 @@ type Program struct {
 	Body []Statement
 
 	DeclarationList []*VariableDeclaration
+	ImportEntries   []*ImportDeclaration
+	ExportEntries   []*ExportDeclaration
 
 	File *file.File
 }
@@ -684,6 +754,9 @@ func (self *PropertyShort) Idx0() file.Idx                 { return self.Name.Id
 func (self *PropertyKeyed) Idx0() file.Idx                 { return self.Key.Idx0() }
 func (self *ExpressionBody) Idx0() file.Idx                { return self.Expression.Idx0() }
 
+func (self *ExportDeclaration) Idx0() file.Idx { return self.idx0 }
+func (self *ImportDeclaration) Idx0() file.Idx { return self.Idx }
+
 func (self *FieldDefinition) Idx0() file.Idx  { return self.Idx }
 func (self *MethodDefinition) Idx0() file.Idx { return self.Idx }
 func (self *ClassStaticBlock) Idx0() file.Idx { return self.Static }
@@ -734,6 +807,7 @@ func (self *UnaryExpression) Idx1() file.Idx {
 	}
 	return self.Operand.Idx1()
 }
+
 func (self *MetaProperty) Idx1() file.Idx {
 	return self.Property.Idx1()
 }
@@ -795,6 +869,9 @@ func (self *PropertyShort) Idx1() file.Idx {
 func (self *PropertyKeyed) Idx1() file.Idx { return self.Value.Idx1() }
 
 func (self *ExpressionBody) Idx1() file.Idx { return self.Expression.Idx1() }
+
+func (self *ExportDeclaration) Idx1() file.Idx { return self.idx1 }
+func (self *ImportDeclaration) Idx1() file.Idx { return self.Idx } // TODO fix
 
 func (self *FieldDefinition) Idx1() file.Idx {
 	if self.Initializer != nil {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/dop251/goja/file"
 	"go/ast"
 	"hash/maphash"
 	"math"
@@ -14,6 +13,8 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	"github.com/dop251/goja/file"
 
 	"golang.org/x/text/collate"
 
@@ -181,6 +182,9 @@ type Runtime struct {
 	vm    *vm
 	hash  *maphash.Hash
 	idSeq uint64
+
+	modules          map[ModuleRecord]ModuleInstance
+	moduleNamespaces map[ModuleRecord]*namespaceObject
 
 	jobQueue []func()
 
@@ -1373,7 +1377,6 @@ func (r *Runtime) RunString(str string) (Value, error) {
 // RunScript executes the given string in the global context.
 func (r *Runtime) RunScript(name, src string) (Value, error) {
 	p, err := r.compile(name, src, false, true, nil)
-
 	if err != nil {
 		return nil, err
 	}

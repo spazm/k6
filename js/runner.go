@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja/unistring"
 	"github.com/oxtoacart/bpool"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
@@ -381,14 +382,12 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 		return nil, err
 	}
 
-	handleSummaryFn := goja.Undefined()
-	fn := vu.getExported(consts.HandleSummaryFn)
-	if _, ok := goja.AssertFunction(fn); ok {
-		handleSummaryFn = fn
-	} else if fn != nil {
-		return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
+	fn := vu.ModuleInstance.GetBindingValue(unistring.String("handleSummary"))
+	if fn != nil {
+		if _, ok := goja.AssertFunction(fn); !ok {
+			return nil, fmt.Errorf("exported identifier %s must be a function", consts.HandleSummaryFn)
+		}
 	}
-
 	ctx, cancel := context.WithTimeout(ctx, r.getTimeoutFor(consts.HandleSummaryFn))
 	defer cancel()
 	go func() {
@@ -408,7 +407,7 @@ func (r *Runner) HandleSummary(ctx context.Context, summary *lib.Summary) (map[s
 	}
 
 	wrapperArgs := []goja.Value{
-		handleSummaryFn,
+		fn,
 		vu.Runtime.ToValue(r.Bundle.RuntimeOptions.SummaryExport.String),
 		vu.Runtime.ToValue(summaryDataForJS),
 	}
@@ -722,7 +721,7 @@ func (u *ActiveVU) RunOnce() error {
 		}
 	}
 
-	fn, ok := u.exports[u.Exec]
+	fn, ok := u.BundleInstance.exports[u.Exec]
 	if !ok {
 		// Shouldn't happen; this is validated in cmd.validateScenarioConfig()
 		panic(fmt.Sprintf("function '%s' not found in exports", u.Exec))
@@ -761,10 +760,6 @@ func (u *ActiveVU) RunOnce() error {
 	}
 
 	return err
-}
-
-func (u *VU) getExported(name string) goja.Value {
-	return u.BundleInstance.pgm.module.Get("exports").ToObject(u.Runtime).Get(name)
 }
 
 // if isDefault is true, cancel also needs to be provided and it should cancel the provided context

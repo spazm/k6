@@ -2,8 +2,9 @@ package goja
 
 import (
 	"fmt"
-	"github.com/dop251/goja/token"
 	"sort"
+
+	"github.com/dop251/goja/token"
 
 	"github.com/dop251/goja/ast"
 	"github.com/dop251/goja/file"
@@ -77,6 +78,9 @@ type compiler struct {
 	scope *scope
 	block *block
 
+	hostResolveImportedModule HostResolveImportedModuleFunc
+	module                    *SourceTextModuleRecord
+
 	classScope *classScope
 
 	enumGetExpr compiledEnumGetExpr
@@ -89,6 +93,7 @@ type binding struct {
 	scope        *scope
 	name         unistring.String
 	accessPoints map[*scope]*[]int
+	getIndirect  func(vm *vm) Value
 	isConst      bool
 	isStrict     bool
 	isArg        bool
@@ -128,7 +133,9 @@ func (b *binding) markAccessPoint() {
 
 func (b *binding) emitGet() {
 	b.markAccessPoint()
-	if b.isVar && !b.isArg {
+	if b.getIndirect != nil {
+		b.scope.c.emit(loadIndirect(b.getIndirect))
+	} else if b.isVar && !b.isArg {
 		b.scope.c.emit(loadStack(0))
 	} else {
 		b.scope.c.emit(loadStackLex(0))
@@ -137,7 +144,9 @@ func (b *binding) emitGet() {
 
 func (b *binding) emitGetAt(pos int) {
 	b.markAccessPointAt(pos)
-	if b.isVar && !b.isArg {
+	if b.getIndirect != nil {
+		b.scope.c.p.code[pos] = loadIndirect(b.getIndirect)
+	} else if b.isVar && !b.isArg {
 		b.scope.c.p.code[pos] = loadStack(0)
 	} else {
 		b.scope.c.p.code[pos] = loadStackLex(0)
@@ -231,7 +240,9 @@ func (b *binding) emitInitPAtScope(scope *scope, pos int) {
 
 func (b *binding) emitGetVar(callee bool) {
 	b.markAccessPoint()
-	if b.isVar && !b.isArg {
+	if b.getIndirect != nil {
+		b.scope.c.emit(loadIndirect(b.getIndirect))
+	} else if b.isVar && !b.isArg {
 		b.scope.c.emit(&loadMixed{name: b.name, callee: callee})
 	} else {
 		b.scope.c.emit(&loadMixedLex{name: b.name, callee: callee})
@@ -663,6 +674,16 @@ func (s *scope) finaliseVarAlloc(stackOffset int) (stashSize, stackSize int) {
 						switch i := (*ap).(type) {
 						case loadStack:
 							*ap = loadStash(idx)
+						case export:
+							*ap = export{
+								idx:      idx,
+								callback: i.callback,
+							}
+						case exportLex:
+							*ap = exportLex{
+								idx:      idx,
+								callback: i.callback,
+							}
 						case storeStack:
 							*ap = storeStash(idx)
 						case storeStackP:
@@ -683,6 +704,8 @@ func (s *scope) finaliseVarAlloc(stackOffset int) (stashSize, stackSize int) {
 							i.idx = idx
 						case *resolveMixed:
 							i.idx = idx
+						case loadIndirect:
+							// do nothing
 						default:
 							s.c.assert(false, s.c.p.sourceOffset(pc), "Unsupported instruction for binding: %T", i)
 						}
@@ -876,6 +899,200 @@ found:
 	s.bindings = s.bindings[:l]
 }
 
+func (c *compiler) compileModule(module *SourceTextModuleRecord) {
+	oldModule := c.module
+	c.module = module
+	oldResolve := c.hostResolveImportedModule
+	c.hostResolveImportedModule = module.hostResolveImportedModule
+	defer func() {
+		c.module = oldModule
+		c.hostResolveImportedModule = oldResolve
+	}()
+	in := module.body
+	c.p.src = in.File
+	strict := true
+	inGlobal := false
+	eval := false
+
+	c.newScope()
+	scope := c.scope
+	scope.dynamic = true
+	scope.eval = eval
+	if !strict && len(in.Body) > 0 {
+		strict = c.isStrict(in.Body) != nil
+	}
+	scope.strict = strict
+	ownVarScope := eval && strict || true
+	ownLexScope := !inGlobal || eval
+	if ownVarScope {
+		c.newBlockScope()
+		scope = c.scope
+		scope.funcType = funcRegular
+		scope.variable = true
+	}
+	for _, in := range module.indirectExportEntries {
+		v, ambiguous := module.ResolveExport(in.exportName)
+		if v == nil || ambiguous {
+			c.compileAmbiguousImport(unistring.NewFromString(in.importName))
+		}
+
+	}
+	// scope.module = module
+	// module.scope = scope
+	// 15.2.1.17.4 step 9 start
+	for _, in := range module.importEntries {
+		importedModule, err := c.hostResolveImportedModule(module, in.moduleRequest)
+		if err != nil {
+			panic(fmt.Errorf("previously resolved module returned error %w", err))
+		}
+		if in.importName == "*" {
+			c.createImmutableBinding(unistring.NewFromString(in.localName), true)
+		} else {
+			resolution, ambiguous := importedModule.ResolveExport(in.importName)
+			if resolution == nil || ambiguous {
+				c.compileAmbiguousImport(unistring.NewFromString(in.importName))
+				continue
+			}
+			c.createImmutableBinding(unistring.NewFromString(in.localName), true)
+		}
+	}
+	// 15.2.1.17.4 step 9 end
+	funcs := c.extractFunctions(in.Body)
+	c.createFunctionBindings(funcs)
+	numFuncs := len(scope.bindings)
+	if inGlobal && !ownVarScope {
+		if numFuncs == len(funcs) {
+			c.compileFunctionsGlobalAllUnique(funcs)
+		} else {
+			c.compileFunctionsGlobal(funcs)
+		}
+	}
+	c.compileDeclList(in.DeclarationList, false)
+	numVars := len(scope.bindings) - numFuncs
+	vars := make([]unistring.String, len(scope.bindings))
+	for i, b := range scope.bindings {
+		vars[i] = b.name
+	}
+	if len(vars) > 0 && !ownVarScope && ownLexScope {
+		if inGlobal {
+			c.emit(&bindGlobal{
+				vars:      vars[numFuncs:],
+				funcs:     vars[:numFuncs],
+				deletable: eval,
+			})
+		} else {
+			c.emit(&bindVars{names: vars, deletable: eval})
+		}
+	}
+	var enter *enterBlock
+	if c.compileLexicalDeclarations(in.Body, ownVarScope || !ownLexScope) {
+		if ownLexScope {
+			c.block = &block{
+				outer:      c.block,
+				typ:        blockScope,
+				needResult: true,
+			}
+			enter = &enterBlock{}
+			c.emit(enter)
+		}
+	}
+
+	for _, exp := range in.Body {
+		if imp, ok := exp.(*ast.ImportDeclaration); ok {
+			c.compileImportDeclaration(imp)
+		}
+	}
+	for _, entry := range module.localExportEntries {
+		name := unistring.NewFromString(entry.localName)
+		b, ok := scope.boundNames[name]
+		if !ok {
+			if entry.localName != "default" {
+				// TODO fix index
+				c.throwSyntaxError(0, "exporting unknown binding: %q", name)
+			}
+			b, _ = scope.bindName(name)
+		}
+
+		b.inStash = true
+		b.markAccessPoint()
+
+		exportName := unistring.NewFromString(entry.localName)
+		lex := entry.lex || !scope.boundNames[exportName].isVar
+		callback := func(vm *vm, getter func() Value) {
+			m := vm.r.modules[module]
+
+			if s, ok := m.(*SourceTextModuleInstance); !ok {
+				vm.r.throwReferenceError(exportName) // TODO fix
+			} else {
+				s.exportGetters[exportName] = getter
+			}
+		}
+		if lex {
+			c.emit(exportLex{callback: callback})
+		} else {
+			c.emit(export{callback: callback})
+		}
+	}
+	for _, entry := range module.indirectExportEntries {
+		otherModule, err := c.hostResolveImportedModule(c.module, entry.moduleRequest)
+		if err != nil {
+			panic(fmt.Errorf("previously resolved module returned error %w", err))
+		}
+		if entry.importName == "*" {
+			continue
+		}
+		b, ambiguous := otherModule.ResolveExport(entry.importName)
+		if ambiguous || b == nil {
+			c.compileAmbiguousImport(unistring.NewFromString(entry.importName))
+			continue
+		}
+
+		exportName := unistring.NewFromString(entry.exportName)
+		importName := unistring.NewFromString(b.BindingName)
+		c.emit(exportIndirect{callback: func(vm *vm) {
+			m := vm.r.modules[module]
+			m2 := vm.r.modules[b.Module]
+
+			if s, ok := m.(*SourceTextModuleInstance); !ok {
+				vm.r.throwReferenceError(exportName) // TODO fix
+			} else {
+				s.exportGetters[exportName] = func() Value {
+					v := m2.GetBindingValue(importName)
+					return v
+				}
+			}
+		}})
+	}
+	if len(scope.bindings) > 0 && !ownLexScope {
+		var lets, consts []unistring.String
+		for _, b := range c.scope.bindings[numFuncs+numVars:] {
+			if b.isConst {
+				consts = append(consts, b.name)
+			} else {
+				lets = append(lets, b.name)
+			}
+		}
+		c.emit(&bindGlobal{
+			vars:   vars[numFuncs:],
+			funcs:  vars[:numFuncs],
+			lets:   lets,
+			consts: consts,
+		})
+	}
+	if !inGlobal || ownVarScope {
+		c.compileFunctions(funcs)
+	}
+	c.compileStatements(in.Body, true)
+	if enter != nil {
+		c.leaveScopeBlock(enter)
+		c.popScope()
+	}
+
+	c.p.code = append(c.p.code, halt)
+
+	scope.finaliseVarAlloc(0)
+}
+
 func (c *compiler) compile(in *ast.Program, strict, inGlobal bool, evalVm *vm) {
 	c.ctxVM = evalVm
 
@@ -973,6 +1190,10 @@ func (c *compiler) compile(in *ast.Program, strict, inGlobal bool, evalVm *vm) {
 	scope.finaliseVarAlloc(0)
 }
 
+func (c *compiler) compileAmbiguousImport(name unistring.String) {
+	c.emit(ambiguousImport(name))
+}
+
 func (c *compiler) compileDeclList(v []*ast.VariableDeclaration, inFunc bool) {
 	for _, value := range v {
 		c.createVarBindings(value, inFunc)
@@ -998,6 +1219,13 @@ func (c *compiler) extractFunctions(list []ast.Statement) (funcs []*ast.Function
 			} else {
 				continue
 			}
+		case *ast.ExportDeclaration:
+			if st.HoistableDeclaration == nil {
+				continue
+			}
+			if st.HoistableDeclaration.FunctionDeclaration != nil {
+				decl = st.HoistableDeclaration.FunctionDeclaration
+			}
 		default:
 			continue
 		}
@@ -1009,9 +1237,12 @@ func (c *compiler) extractFunctions(list []ast.Statement) (funcs []*ast.Function
 func (c *compiler) createFunctionBindings(funcs []*ast.FunctionDeclaration) {
 	s := c.scope
 	if s.outer != nil {
-		unique := !s.isFunction() && !s.variable && s.strict
+		unique := (!s.isFunction() && !s.variable && s.strict) || (c.module != nil && s.outer.outer == nil)
 		for _, decl := range funcs {
 			s.bindNameLexical(decl.Function.Name.Name, unique, int(decl.Function.Name.Idx1())-1)
+			if decl.IsDefault && decl.Function.Name.Name != "default" {
+				s.bindNameLexical("default", unique, int(decl.Function.Name.Idx1())-1)
+			}
 		}
 	} else {
 		for _, decl := range funcs {
@@ -1111,6 +1342,15 @@ func (c *compiler) createVarBindings(v *ast.VariableDeclaration, inFunc bool) {
 	}
 }
 
+func (c *compiler) createImmutableBinding(name unistring.String, isConst bool) *binding {
+	b, _ := c.scope.bindName(name)
+	b.inStash = true
+	b.isConst = isConst
+	// b.isVar = true // TODO figure out if this needs to be true at some point
+	// b.isStrict = isStrict
+	return b
+}
+
 func (c *compiler) createLexicalIdBinding(name unistring.String, isConst bool, offset int) *binding {
 	if name == "let" {
 		c.throwSyntaxError(offset, "let is disallowed as a lexically bound name")
@@ -1174,6 +1414,25 @@ func (c *compiler) compileLexicalDeclarations(list []ast.Statement, scopeDeclare
 				scopeDeclared = true
 			}
 			c.createLexicalIdBinding(cls.Class.Name.Name, false, int(cls.Class.Name.Idx)-1)
+		} else if exp, ok := st.(*ast.ExportDeclaration); ok && exp.LexicalDeclaration != nil {
+			// TODO refactor
+			if !scopeDeclared {
+				c.newBlockScope()
+				scopeDeclared = true
+			}
+			c.createLexicalBindings(exp.LexicalDeclaration)
+		} else if exp, ok := st.(*ast.ExportDeclaration); ok && exp.ClassDeclaration != nil {
+			// TODO refactor
+			if !scopeDeclared {
+				c.newBlockScope()
+				scopeDeclared = true
+			}
+			cls := exp.ClassDeclaration
+			if exp.IsDefault {
+				c.createLexicalIdBinding("default", false, int(exp.Idx0())-1)
+			} else {
+				c.createLexicalIdBinding(cls.Class.Name.Name, false, int(cls.Class.Name.Idx)-1)
+			}
 		}
 	}
 	return scopeDeclared
